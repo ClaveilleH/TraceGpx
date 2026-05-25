@@ -1,0 +1,19 @@
+{
+  "name": "TraceGPX",
+  "short_name": "TraceGPX",
+  "description": "Planificateur GPX de randonnée avec sauvegarde locale.",
+  "start_url": "./tracegpx.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f4f1ea",
+  "theme_color": "#4a5d3a",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "./tracegpx-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

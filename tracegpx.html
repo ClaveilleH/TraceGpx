@@ -3,8 +3,13 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#4a5d3a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="TraceGPX">
 <title>TraceGPX — Plan IGN</title>
 
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/svg+xml" href="tracegpx-icon.svg">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Spline+Sans+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -77,6 +82,18 @@
   .switch input:checked + .slider { background: var(--rust); }
   .switch input:checked + .slider::before { transform: translateX(17px); }
 
+  .status-row {
+    display: flex; justify-content: space-between; align-items: center; gap: 8px;
+    margin: -4px 0 14px; font-size: 10px; color: rgba(42,38,32,.7);
+  }
+  .status-main { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .status-dot {
+    width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+    background: var(--moss);
+  }
+  .status-dot.offline { background: var(--rust); }
+  .storage-badge { white-space: nowrap; opacity: .75; }
+
   .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 14px; }
   .stat { background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; }
   .stat .label { font-size: 9px; text-transform: uppercase; letter-spacing: .6px; opacity: .55; }
@@ -143,6 +160,11 @@
       <span>Suivre les chemins <em style="opacity:.6">(snap)</em></span>
     </div>
 
+    <div class="status-row" aria-live="polite">
+      <span class="status-main"><span class="status-dot" id="netDot"></span><span id="netLabel">En ligne</span></span>
+      <span class="storage-badge" id="storageLabel">Stockage local</span>
+    </div>
+
     <div class="stats">
       <div class="stat"><div class="label">Distance</div><div class="val" id="dist">0<small> km</small></div></div>
       <div class="stat"><div class="label">D+ </div><div class="val" id="dplus">0<small> m</small></div></div>
@@ -178,6 +200,13 @@ const WMTS = "https://data.geopf.fr/wmts" +
 
 const ROUTE_URL = "https://data.geopf.fr/navigation/itineraire";
 const ELEV_URL  = "https://data.geopf.fr/altimetrie/1.0/calcul/alti/rest/elevationLine.json";
+const STORAGE_KEY = "tracegpx.state.v1";
+const RUNTIME_CACHE = "tracegpx-runtime-v1";
+const OFFLINE_ASSETS = [
+  "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css",
+  "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js",
+  "https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Spline+Sans+Mono:wght@400;500&display=swap",
+];
 
 const layers = {
   plan: L.tileLayer(
@@ -194,7 +223,8 @@ const layers = {
       attribution: "© OpenTopoMap (CC-BY-SA) · données © OpenStreetMap" }),
 };
 
-const map = L.map("map", { center: [45.05, 6.40], zoom: 12, zoomControl: true });
+const map = L.map("map", { center: [45.05, 6.40], zoom: 12, zoomControl: false });
+L.control.zoom({ position: "bottomright" }).addTo(map);
 layers.plan.addTo(map);
 
 // ---------------------------------------------------------------------------
@@ -205,9 +235,99 @@ let segments = [];         // tableaux de latlng entre 2 ancres consécutives
 let polyline = L.polyline([], { color: "#b5532a", weight: 4, opacity: .9 }).addTo(map);
 let markers = L.layerGroup().addTo(map);
 let elevData = [];
+let activeLayer = "plan";
+let savedView = null;
 
 const $ = id => document.getElementById(id);
 const snap = $("snap");
+
+// ---------------------------------------------------------------------------
+// STOCKAGE LOCAL
+// ---------------------------------------------------------------------------
+function serializePoint(p) {
+  return { lat: Number(p.lat.toFixed(6)), lng: Number(p.lng.toFixed(6)) };
+}
+
+function revivePoint(p) {
+  if (!p || typeof p.lat !== "number" || typeof p.lng !== "number") return null;
+  return L.latLng(p.lat, p.lng);
+}
+
+function saveState() {
+  try {
+    const state = {
+      anchors: anchors.map(serializePoint),
+      segments: segments.map(seg => seg.map(serializePoint)),
+      elevData,
+      activeLayer,
+      snap: snap.checked,
+      view: {
+        center: serializePoint(map.getCenter()),
+        zoom: map.getZoom(),
+      },
+    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  } catch { /* stockage indisponible ou quota atteint */ }
+}
+
+function loadState() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return;
+    const state = JSON.parse(raw);
+    anchors = (state.anchors || []).map(revivePoint).filter(Boolean);
+    segments = (state.segments || [])
+      .map(seg => seg.map(revivePoint).filter(Boolean))
+      .filter(seg => seg.length);
+    elevData = Array.isArray(state.elevData) ? state.elevData.filter(Number.isFinite) : [];
+    activeLayer = layers[state.activeLayer] ? state.activeLayer : "plan";
+    snap.checked = state.snap !== false;
+    const center = revivePoint(state.view?.center);
+    if (center) {
+      savedView = {
+        center,
+        zoom: Number.isFinite(state.view?.zoom) ? state.view.zoom : 12,
+      };
+    }
+  } catch { /* état invalide ignoré */ }
+}
+
+async function requestPersistentStorage() {
+  const label = $("storageLabel");
+  if (!navigator.storage?.persist) return;
+  try {
+    const persisted = await navigator.storage.persisted();
+    const granted = persisted || await navigator.storage.persist();
+    label.textContent = granted ? "Stockage persistant" : "Stockage local";
+  } catch { /* certains navigateurs mobiles ne supportent pas la demande */ }
+}
+
+function registerServiceWorker() {
+  if (!("serviceWorker" in navigator) || location.protocol === "file:") return;
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("./service-worker.js").catch(() => {});
+  });
+}
+
+async function warmOfflineCache() {
+  if (!("caches" in window)) return;
+  try {
+    const cache = await caches.open(RUNTIME_CACHE);
+    await Promise.allSettled(OFFLINE_ASSETS.map(async url => {
+      const request = new Request(url, { mode: "no-cors" });
+      const cached = await cache.match(request);
+      if (cached) return;
+      const response = await fetch(request);
+      if (response) await cache.put(request, response);
+    }));
+  } catch { /* cache indisponible ou requête réseau refusée */ }
+}
+
+function syncOnlineStatus() {
+  const online = navigator.onLine;
+  $("netDot").classList.toggle("offline", !online);
+  $("netLabel").textContent = online ? "En ligne" : "Hors ligne";
+}
 
 // ---------------------------------------------------------------------------
 // CLIC CARTE → ajoute une ancre
@@ -227,14 +347,17 @@ map.on("click", async (e) => {
     anchors.push(pt);
     segments.push(seg);
   }
+  elevData = [];
   redraw();
   refreshStats();
+  saveState();
 });
 
 // ---------------------------------------------------------------------------
 // ROUTING (snap-to-route piéton)
 // ---------------------------------------------------------------------------
 async function routeBetween(a, b) {
+  if (!navigator.onLine) return null;
   const url = ROUTE_URL +
     `?resource=bdtopo-osrm&profile=pedestrian&optimization=shortest` +
     `&start=${a.lng},${a.lat}&end=${b.lng},${b.lat}` +
@@ -273,15 +396,23 @@ function redraw() {
 // ---------------------------------------------------------------------------
 // STATS : distance + altimétrie (D+)
 // ---------------------------------------------------------------------------
-function refreshStats() {
+function refreshStats(options = {}) {
+  const updateElev = options.updateElevation !== false;
   const line = fullLine();
   let d = 0;
   for (let i = 1; i < line.length; i++) d += line[i-1].distanceTo(line[i]);
   $("dist").innerHTML = (d/1000).toFixed(2) + "<small> km</small>";
-  if (anchors.length >= 2) updateElevation(line);
+  if (anchors.length >= 2) {
+    if (elevData.length) { computeDplus(); drawProfile(); }
+    if (updateElev && navigator.onLine) updateElevation(line);
+  } else {
+    $("elevPanel").classList.remove("show");
+    $("dplus").innerHTML = "0<small> m</small>";
+  }
 }
 
 async function updateElevation(line) {
+  if (!navigator.onLine || line.length < 2) return;
   // échantillonne max ~190 pts (limite raisonnable de l'API)
   const step = Math.max(1, Math.ceil(line.length / 190));
   const sampled = line.filter((_, i) => i % step === 0);
@@ -291,7 +422,7 @@ async function updateElevation(line) {
     const r = await fetch(`${ELEV_URL}?lon=${lon}&lat=${lat}&resource=ign_rge_alti_wld`);
     const j = await r.json();
     elevData = (j.elevations || []).map(e => e.z).filter(z => z != null && z > -1000);
-    if (elevData.length) { computeDplus(); drawProfile(); }
+    if (elevData.length) { computeDplus(); drawProfile(); saveState(); }
   } catch { /* silencieux */ }
 }
 
@@ -305,6 +436,7 @@ function computeDplus() {
 }
 
 function drawProfile() {
+  if (elevData.length < 2) return;
   const svg = $("elevSvg"); svg.innerHTML = "";
   const W = 800, H = 110, pad = 4;
   const min = Math.min(...elevData), max = Math.max(...elevData);
@@ -355,8 +487,10 @@ $("export").onclick = () => {
 $("undo").onclick = () => {
   if (!anchors.length) return;
   anchors.pop(); segments.pop();
+  elevData = [];
   if (anchors.length < 2) { $("elevPanel").classList.remove("show"); $("dplus").innerHTML = "0<small> m</small>"; }
   redraw(); refreshStats();
+  saveState();
 };
 $("clear").onclick = () => {
   anchors = []; segments = []; elevData = [];
@@ -364,18 +498,39 @@ $("clear").onclick = () => {
   $("dist").innerHTML = "0<small> km</small>";
   $("dplus").innerHTML = "0<small> m</small>";
   $("elevPanel").classList.remove("show");
+  saveState();
 };
 
+function setActiveLayer(name, persist = true) {
+  if (!layers[name]) name = "plan";
+  activeLayer = name;
+  document.querySelectorAll("#layers button").forEach(b => {
+    b.classList.toggle("active", b.dataset.layer === name);
+  });
+  Object.values(layers).forEach(l => map.removeLayer(l));
+  layers[name].addTo(map);
+  if (persist) saveState();
+}
+
 document.querySelectorAll("#layers button").forEach(b => {
-  b.onclick = () => {
-    document.querySelectorAll("#layers button").forEach(x => x.classList.remove("active"));
-    b.classList.add("active");
-    Object.values(layers).forEach(l => map.removeLayer(l));
-    layers[b.dataset.layer].addTo(map);
-  };
+  b.onclick = () => setActiveLayer(b.dataset.layer);
 });
 
+snap.onchange = saveState;
+window.addEventListener("online", syncOnlineStatus);
+window.addEventListener("offline", syncOnlineStatus);
+window.addEventListener("beforeunload", saveState);
+
+loadState();
+if (savedView) map.setView(savedView.center, savedView.zoom);
+setActiveLayer(activeLayer, false);
+syncOnlineStatus();
+requestPersistentStorage();
+registerServiceWorker();
+warmOfflineCache();
+map.on("moveend", saveState);
 redraw();
+refreshStats({ updateElevation: !elevData.length });
 </script>
 </body>
 </html>
