@@ -1,0 +1,19 @@
+services:
+  tracegpx:
+    image: nginx:alpine
+    container_name: tracegpx
+    restart: unless-stopped
+    volumes:
+      - "/home/hugo/Perso/TraceGpx:/usr/share/nginx/html:ro"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.tracegpx.rule=Host(`tracegpx.claveille.fr`)"
+      - "traefik.http.routers.tracegpx.entrypoints=websecure"
+      - "traefik.http.routers.tracegpx.tls=true"
+    networks:
+      - traefik-public
+
+networks:
+  traefik-public:
+    external: true
+EOF
