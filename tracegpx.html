@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TraceGPX — Plan IGN</title>
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Spline+Sans+Mono:wght@400;500&display=swap" rel="stylesheet">
+
+<style>
+  :root {
+    --bg: #f4f1ea;
+    --panel: #fbf9f4;
+    --ink: #2a2620;
+    --moss: #4a5d3a;
+    --moss-dk: #36462a;
+    --rust: #b5532a;
+    --line: #d8d2c4;
+    --shadow: 0 2px 12px rgba(42,38,32,.12);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    font-family: 'Spline Sans Mono', monospace;
+    color: var(--ink);
+    background: var(--bg);
+    overflow: hidden;
+  }
+  #map { position: absolute; inset: 0; z-index: 1; }
+
+  /* ---- Panneau de contrôle ---- */
+  .panel {
+    position: absolute; top: 16px; left: 16px; z-index: 1000;
+    width: 280px; max-width: calc(100vw - 32px);
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    box-shadow: var(--shadow);
+    overflow: hidden;
+  }
+  .panel header {
+    background: var(--moss);
+    color: #f4f1ea;
+    padding: 14px 16px;
+  }
+  .panel header h1 {
+    font-family: 'Fraunces', serif;
+    font-weight: 600;
+    font-size: 19px;
+    letter-spacing: .3px;
+  }
+  .panel header p { font-size: 11px; opacity: .8; margin-top: 2px; }
+  .panel .body { padding: 14px 16px; }
+
+  .toggle-row { display: flex; gap: 6px; margin-bottom: 14px; }
+  .toggle-row button {
+    flex: 1; padding: 7px 0; font-size: 11px; cursor: pointer;
+    font-family: inherit; color: var(--ink);
+    background: #fff; border: 1px solid var(--line); border-radius: 6px;
+    transition: all .15s;
+  }
+  .toggle-row button.active { background: var(--moss); color: #fff; border-color: var(--moss); }
+
+  .mode-row { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; font-size: 12px; }
+  .switch { position: relative; width: 38px; height: 21px; flex-shrink: 0; }
+  .switch input { display: none; }
+  .slider {
+    position: absolute; inset: 0; background: #cfc8b8; border-radius: 21px;
+    cursor: pointer; transition: .2s;
+  }
+  .slider::before {
+    content: ""; position: absolute; width: 15px; height: 15px; left: 3px; top: 3px;
+    background: #fff; border-radius: 50%; transition: .2s;
+  }
+  .switch input:checked + .slider { background: var(--rust); }
+  .switch input:checked + .slider::before { transform: translateX(17px); }
+
+  .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 14px; }
+  .stat { background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; }
+  .stat .label { font-size: 9px; text-transform: uppercase; letter-spacing: .6px; opacity: .55; }
+  .stat .val { font-family: 'Fraunces', serif; font-size: 19px; font-weight: 600; margin-top: 1px; }
+  .stat .val small { font-size: 11px; font-weight: 400; opacity: .6; }
+
+  .actions { display: flex; flex-direction: column; gap: 7px; }
+  .actions button {
+    padding: 9px; font-size: 12px; cursor: pointer; font-family: inherit;
+    border-radius: 6px; border: 1px solid transparent; transition: all .15s;
+  }
+  .btn-primary { background: var(--rust); color: #fff; }
+  .btn-primary:hover { background: #9c4422; }
+  .btn-ghost { background: #fff; color: var(--ink); border-color: var(--line); }
+  .btn-ghost:hover { background: #f0ece2; }
+  .actions button:disabled { opacity: .4; cursor: not-allowed; }
+
+  /* ---- Profil altimétrique ---- */
+  .elev {
+    position: absolute; bottom: 0; left: 0; right: 0; z-index: 1000;
+    height: 150px; background: var(--panel); border-top: 1px solid var(--line);
+    box-shadow: 0 -2px 12px rgba(42,38,32,.1);
+    transform: translateY(100%); transition: transform .3s ease;
+  }
+  .elev.show { transform: translateY(0); }
+  .elev .head {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 6px 16px; font-size: 11px; border-bottom: 1px solid var(--line);
+  }
+  .elev .head strong { font-family: 'Fraunces', serif; font-size: 13px; }
+  .elev svg { display: block; width: 100%; height: 110px; }
+
+  .hint {
+    position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%);
+    z-index: 999; background: rgba(42,38,32,.85); color: #f4f1ea;
+    padding: 8px 16px; border-radius: 20px; font-size: 11px;
+    pointer-events: none; transition: opacity .3s;
+  }
+  .leaflet-container { background: #e8e3d8; }
+  .attribution-note { font-size: 9px; opacity: .5; margin-top: 10px; line-height: 1.4; }
+</style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<div class="panel">
+  <header>
+    <h1>TraceGPX</h1>
+    <p>Plan IGN · tracé de randonnée</p>
+  </header>
+  <div class="body">
+    <div class="toggle-row" id="layers">
+      <button data-layer="plan" class="active">Plan IGN</button>
+      <button data-layer="topo">OpenTopo</button>
+      <button data-layer="photo">Satellite</button>
+    </div>
+
+    <div class="mode-row">
+      <label class="switch">
+        <input type="checkbox" id="snap" checked>
+        <span class="slider"></span>
+      </label>
+      <span>Suivre les chemins <em style="opacity:.6">(snap)</em></span>
+    </div>
+
+    <div class="stats">
+      <div class="stat"><div class="label">Distance</div><div class="val" id="dist">0<small> km</small></div></div>
+      <div class="stat"><div class="label">D+ </div><div class="val" id="dplus">0<small> m</small></div></div>
+    </div>
+
+    <div class="actions">
+      <button class="btn-primary" id="export" disabled>Exporter le GPX</button>
+      <button class="btn-ghost" id="undo" disabled>Annuler le dernier point</button>
+      <button class="btn-ghost" id="clear" disabled>Tout effacer</button>
+    </div>
+
+    <p class="attribution-note">Fonds : Plan IGN / orthophotos © IGN-Géoplateforme.
+    Itinéraire & altitude via les services data.geopf.fr.</p>
+  </div>
+</div>
+
+<div class="elev" id="elevPanel">
+  <div class="head"><strong>Profil altimétrique</strong><span id="elevRange"></span></div>
+  <svg id="elevSvg" viewBox="0 0 800 110" preserveAspectRatio="none"></svg>
+</div>
+
+<div class="hint" id="hint">Clique sur la carte pour poser ton premier point</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+// ---------------------------------------------------------------------------
+// CONFIG — endpoints publics Géoplateforme (pas de clé nécessaire)
+// ---------------------------------------------------------------------------
+const WMTS = "https://data.geopf.fr/wmts" +
+  "?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0" +
+  "&LAYER={layer}&STYLE={style}&FORMAT={format}" +
+  "&TILEMATRIXSET=PM&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}";
+
+const ROUTE_URL = "https://data.geopf.fr/navigation/itineraire";
+const ELEV_URL  = "https://data.geopf.fr/altimetrie/1.0/calcul/alti/rest/elevationLine.json";
+
+const layers = {
+  plan: L.tileLayer(
+    WMTS.replace("{layer}","GEOGRAPHICALGRIDSYSTEMS.PLANIGNV2")
+        .replace("{style}","normal").replace("{format}","image/png"),
+    { maxZoom: 19, attribution: "© IGN" }),
+  photo: L.tileLayer(
+    WMTS.replace("{layer}","ORTHOIMAGERY.ORTHOPHOTOS")
+        .replace("{style}","normal").replace("{format}","image/jpeg"),
+    { maxZoom: 19, attribution: "© IGN" }),
+  topo: L.tileLayer(
+    "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
+    { maxZoom: 17, subdomains: "abc",
+      attribution: "© OpenTopoMap (CC-BY-SA) · données © OpenStreetMap" }),
+};
+
+const map = L.map("map", { center: [45.05, 6.40], zoom: 12, zoomControl: true });
+layers.plan.addTo(map);
+
+// ---------------------------------------------------------------------------
+// ETAT
+// ---------------------------------------------------------------------------
+let anchors = [];          // points cliqués (L.latLng)
+let segments = [];         // tableaux de latlng entre 2 ancres consécutives
+let polyline = L.polyline([], { color: "#b5532a", weight: 4, opacity: .9 }).addTo(map);
+let markers = L.layerGroup().addTo(map);
+let elevData = [];
+
+const $ = id => document.getElementById(id);
+const snap = $("snap");
+
+// ---------------------------------------------------------------------------
+// CLIC CARTE → ajoute une ancre
+// ---------------------------------------------------------------------------
+map.on("click", async (e) => {
+  const pt = e.latlng;
+  if (anchors.length === 0) {
+    anchors.push(pt);
+    segments.push([pt]);
+  } else {
+    const prev = anchors[anchors.length - 1];
+    let seg;
+    if (snap.checked) {
+      seg = await routeBetween(prev, pt);   // snap-to-route via IGN
+    }
+    if (!seg) seg = [prev, pt];             // fallback ligne droite
+    anchors.push(pt);
+    segments.push(seg);
+  }
+  redraw();
+  refreshStats();
+});
+
+// ---------------------------------------------------------------------------
+// ROUTING (snap-to-route piéton)
+// ---------------------------------------------------------------------------
+async function routeBetween(a, b) {
+  const url = ROUTE_URL +
+    `?resource=bdtopo-osrm&profile=pedestrian&optimization=shortest` +
+    `&start=${a.lng},${a.lat}&end=${b.lng},${b.lat}` +
+    `&geometryFormat=geojson&getSteps=false&crs=EPSG:4326`;
+  try {
+    const r = await fetch(url);
+    if (!r.ok) return null;
+    const j = await r.json();
+    const coords = j.geometry?.coordinates;
+    if (!coords) return null;
+    return coords.map(c => L.latLng(c[1], c[0]));
+  } catch { return null; }
+}
+
+// ---------------------------------------------------------------------------
+// RENDU
+// ---------------------------------------------------------------------------
+function fullLine() { return segments.flat(); }
+
+function redraw() {
+  polyline.setLatLngs(fullLine());
+  markers.clearLayers();
+  anchors.forEach((p, i) => {
+    L.circleMarker(p, {
+      radius: 5, color: "#fff", weight: 2,
+      fillColor: i === 0 ? "#4a5d3a" : "#b5532a", fillOpacity: 1
+    }).addTo(markers);
+  });
+  const has = anchors.length > 0;
+  $("undo").disabled = !has;
+  $("clear").disabled = !has;
+  $("export").disabled = anchors.length < 2;
+  $("hint").style.opacity = has ? 0 : 1;
+}
+
+// ---------------------------------------------------------------------------
+// STATS : distance + altimétrie (D+)
+// ---------------------------------------------------------------------------
+function refreshStats() {
+  const line = fullLine();
+  let d = 0;
+  for (let i = 1; i < line.length; i++) d += line[i-1].distanceTo(line[i]);
+  $("dist").innerHTML = (d/1000).toFixed(2) + "<small> km</small>";
+  if (anchors.length >= 2) updateElevation(line);
+}
+
+async function updateElevation(line) {
+  // échantillonne max ~190 pts (limite raisonnable de l'API)
+  const step = Math.max(1, Math.ceil(line.length / 190));
+  const sampled = line.filter((_, i) => i % step === 0);
+  const lon = sampled.map(p => p.lng.toFixed(6)).join("|");
+  const lat = sampled.map(p => p.lat.toFixed(6)).join("|");
+  try {
+    const r = await fetch(`${ELEV_URL}?lon=${lon}&lat=${lat}&resource=ign_rge_alti_wld`);
+    const j = await r.json();
+    elevData = (j.elevations || []).map(e => e.z).filter(z => z != null && z > -1000);
+    if (elevData.length) { computeDplus(); drawProfile(); }
+  } catch { /* silencieux */ }
+}
+
+function computeDplus() {
+  let dplus = 0;
+  for (let i = 1; i < elevData.length; i++) {
+    const diff = elevData[i] - elevData[i-1];
+    if (diff > 0) dplus += diff;
+  }
+  $("dplus").innerHTML = Math.round(dplus) + "<small> m</small>";
+}
+
+function drawProfile() {
+  const svg = $("elevSvg"); svg.innerHTML = "";
+  const W = 800, H = 110, pad = 4;
+  const min = Math.min(...elevData), max = Math.max(...elevData);
+  const rng = max - min || 1;
+  const x = i => pad + (i/(elevData.length-1)) * (W - pad*2);
+  const y = z => H - pad - ((z-min)/rng) * (H - pad*2);
+  let dPath = `M ${x(0)} ${y(elevData[0])}`;
+  elevData.forEach((z,i) => { if(i) dPath += ` L ${x(i)} ${y(z)}`; });
+  const area = dPath + ` L ${x(elevData.length-1)} ${H} L ${x(0)} ${H} Z`;
+  svg.innerHTML =
+    `<path d="${area}" fill="#b5532a" opacity="0.12"/>` +
+    `<path d="${dPath}" fill="none" stroke="#b5532a" stroke-width="2"/>`;
+  $("elevRange").textContent = `${Math.round(min)}–${Math.round(max)} m`;
+  $("elevPanel").classList.add("show");
+}
+
+// ---------------------------------------------------------------------------
+// EXPORT GPX
+// ---------------------------------------------------------------------------
+function buildGPX() {
+  const line = fullLine();
+  const pts = line.map((p,i) => {
+    const z = elevData[Math.floor(i/line.length*elevData.length)];
+    return `      <trkpt lat="${p.lat.toFixed(6)}" lon="${p.lng.toFixed(6)}">` +
+           (z != null ? `<ele>${z.toFixed(1)}</ele>` : "") + `</trkpt>`;
+  }).join("\n");
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="TraceGPX" xmlns="http://www.topografix.com/GPX/1/1">
+  <trk><name>Trace ${new Date().toISOString().slice(0,10)}</name>
+    <trkseg>
+${pts}
+    </trkseg>
+  </trk>
+</gpx>`;
+}
+
+$("export").onclick = () => {
+  const blob = new Blob([buildGPX()], { type: "application/gpx+xml" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `trace-${Date.now()}.gpx`;
+  a.click();
+};
+
+// ---------------------------------------------------------------------------
+// CONTROLES
+// ---------------------------------------------------------------------------
+$("undo").onclick = () => {
+  if (!anchors.length) return;
+  anchors.pop(); segments.pop();
+  if (anchors.length < 2) { $("elevPanel").classList.remove("show"); $("dplus").innerHTML = "0<small> m</small>"; }
+  redraw(); refreshStats();
+};
+$("clear").onclick = () => {
+  anchors = []; segments = []; elevData = [];
+  redraw();
+  $("dist").innerHTML = "0<small> km</small>";
+  $("dplus").innerHTML = "0<small> m</small>";
+  $("elevPanel").classList.remove("show");
+};
+
+document.querySelectorAll("#layers button").forEach(b => {
+  b.onclick = () => {
+    document.querySelectorAll("#layers button").forEach(x => x.classList.remove("active"));
+    b.classList.add("active");
+    Object.values(layers).forEach(l => map.removeLayer(l));
+    layers[b.dataset.layer].addTo(map);
+  };
+});
+
+redraw();
+</script>
+</body>
+</html>
