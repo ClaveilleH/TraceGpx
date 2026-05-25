@@ -102,12 +102,49 @@
     transform: translateY(100%); transition: transform .3s ease;
   }
   .elev.show { transform: translateY(0); }
+  .elev.resizing { transition: none; user-select: none; }
+  .elev .resizer {
+    position: absolute; top: 0; left: 0; right: 0;
+    height: 14px; cursor: ns-resize; z-index: 1001;
+    background: #ece6d6;
+    border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .elev .resizer::before {
+    content: ""; width: 50px; height: 4px;
+    border-radius: 3px; background: #b8b0a0;
+    transition: background .15s;
+  }
+  .elev .resizer:hover { background: #e0d8c5; }
+  .elev .resizer:hover::before { background: var(--moss); }
   .elev .head {
     display: flex; justify-content: space-between; align-items: center;
     padding: 6px 16px; font-size: 11px; border-bottom: 1px solid var(--line);
+    height: 28px; margin-top: 14px;
   }
   .elev .head strong { font-family: 'Fraunces', serif; font-size: 13px; }
-  .elev svg { display: block; width: 100%; height: 110px; }
+  .elev .head .ctrls { display: flex; gap: 10px; align-items: center; }
+  .elev .head select {
+    font-family: inherit; font-size: 11px; padding: 2px 6px;
+    border: 1px solid var(--line); border-radius: 4px;
+    background: #fff; color: var(--ink); cursor: pointer;
+  }
+  .elev .svg-wrap { position: relative; height: calc(100% - 42px); }
+  .elev svg { display: block; width: 100%; height: 100%; }
+  .elev-cursor {
+    position: absolute; top: 0; bottom: 0; width: 1px;
+    background: var(--ink); opacity: .45; pointer-events: none;
+    display: none;
+  }
+  .elev-tooltip {
+    position: absolute; pointer-events: none; display: none;
+    background: rgba(42,38,32,.92); color: #f4f1ea;
+    padding: 5px 9px; border-radius: 5px;
+    font-size: 11px; white-space: nowrap;
+    transform: translate(-50%, -100%); margin-top: -6px;
+    z-index: 10; line-height: 1.4;
+  }
+  .elev-tooltip b { font-weight: 600; color: #fff; }
 
   .hint {
     position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%);
@@ -160,8 +197,24 @@
 </div>
 
 <div class="elev" id="elevPanel">
-  <div class="head"><strong>Profil altimétrique</strong><span id="elevRange"></span></div>
-  <svg id="elevSvg" viewBox="0 0 800 110" preserveAspectRatio="none"></svg>
+  <div class="resizer" id="elevResizer" title="Glisser pour redimensionner"></div>
+  <div class="head">
+    <strong>Profil altimétrique</strong>
+    <div class="ctrls">
+      <select id="elevMarks" title="Repères de distance">
+        <option value="0">Repères : aucun</option>
+        <option value="1">Tous les 1 km</option>
+        <option value="5" selected>Tous les 5 km</option>
+        <option value="10">Tous les 10 km</option>
+      </select>
+      <span id="elevRange"></span>
+    </div>
+  </div>
+  <div class="svg-wrap">
+    <svg id="elevSvg" viewBox="0 0 800 110" preserveAspectRatio="none"></svg>
+    <div class="elev-cursor" id="elevCursor"></div>
+    <div class="elev-tooltip" id="elevTooltip"></div>
+  </div>
 </div>
 
 <div class="hint" id="hint">Clique sur la carte pour poser ton premier point</div>
@@ -204,7 +257,10 @@ let anchors = [];          // points cliqués (L.latLng)
 let segments = [];         // tableaux de latlng entre 2 ancres consécutives
 let polyline = L.polyline([], { color: "#b5532a", weight: 4, opacity: .9 }).addTo(map);
 let markers = L.layerGroup().addTo(map);
-let elevData = [];
+let elevData = [];         // altitudes échantillonnées
+let elevDist = [];         // distances cumulées (m) pour chaque échantillon
+let elevPts  = [];         // latlng correspondant à chaque échantillon
+let hoverMarker = null;    // marqueur sur la trace au survol du profil
 
 const $ = id => document.getElementById(id);
 const snap = $("snap");
@@ -285,12 +341,21 @@ async function updateElevation(line) {
   // échantillonne max ~190 pts (limite raisonnable de l'API)
   const step = Math.max(1, Math.ceil(line.length / 190));
   const sampled = line.filter((_, i) => i % step === 0);
+  // distances cumulées en mètres pour chaque échantillon
+  const dists = [0];
+  for (let i = 1; i < sampled.length; i++) {
+    dists.push(dists[i-1] + sampled[i-1].distanceTo(sampled[i]));
+  }
   const lon = sampled.map(p => p.lng.toFixed(6)).join("|");
   const lat = sampled.map(p => p.lat.toFixed(6)).join("|");
   try {
     const r = await fetch(`${ELEV_URL}?lon=${lon}&lat=${lat}&resource=ign_rge_alti_wld`);
     const j = await r.json();
-    elevData = (j.elevations || []).map(e => e.z).filter(z => z != null && z > -1000);
+    const raw = (j.elevations || []).map((e, i) => ({ z: e.z, d: dists[i], p: sampled[i] }))
+      .filter(p => p.z != null && p.z > -1000);
+    elevData = raw.map(p => p.z);
+    elevDist = raw.map(p => p.d);
+    elevPts  = raw.map(p => p.p);
     if (elevData.length) { computeDplus(); drawProfile(); }
   } catch { /* silencieux */ }
 }
@@ -309,14 +374,34 @@ function drawProfile() {
   const W = 800, H = 110, pad = 4;
   const min = Math.min(...elevData), max = Math.max(...elevData);
   const rng = max - min || 1;
+  const totalD = elevDist[elevDist.length - 1] || 1;
   const x = i => pad + (i/(elevData.length-1)) * (W - pad*2);
+  const xd = d => pad + (d/totalD) * (W - pad*2);
   const y = z => H - pad - ((z-min)/rng) * (H - pad*2);
+
+  // tracé du profil
   let dPath = `M ${x(0)} ${y(elevData[0])}`;
   elevData.forEach((z,i) => { if(i) dPath += ` L ${x(i)} ${y(z)}`; });
   const area = dPath + ` L ${x(elevData.length-1)} ${H} L ${x(0)} ${H} Z`;
+
+  // barres verticales tous les N km
+  const kmStep = parseInt($("elevMarks").value, 10) || 0;
+  let marks = "";
+  if (kmStep > 0) {
+    const totalKm = totalD / 1000;
+    for (let km = kmStep; km < totalKm; km += kmStep) {
+      const xp = xd(km * 1000);
+      marks += `<line x1="${xp}" y1="0" x2="${xp}" y2="${H}" `
+            + `stroke="#36462a" stroke-width="0.6" stroke-dasharray="2,2" opacity="0.55"/>`
+            + `<text x="${xp + 3}" y="10" font-size="9" font-family="Spline Sans Mono, monospace" `
+            + `fill="#36462a" opacity="0.75">${km}km</text>`;
+    }
+  }
+
   svg.innerHTML =
     `<path d="${area}" fill="#b5532a" opacity="0.12"/>` +
-    `<path d="${dPath}" fill="none" stroke="#b5532a" stroke-width="2"/>`;
+    `<path d="${dPath}" fill="none" stroke="#b5532a" stroke-width="2"/>` +
+    marks;
   $("elevRange").textContent = `${Math.round(min)}–${Math.round(max)} m`;
   $("elevPanel").classList.add("show");
 }
@@ -376,6 +461,111 @@ document.querySelectorAll("#layers button").forEach(b => {
 });
 
 redraw();
+
+// ---------------------------------------------------------------------------
+// REDIMENSIONNEMENT DU PANNEAU D'ALTITUDE
+// ---------------------------------------------------------------------------
+(function setupElevResize() {
+  const panel = $("elevPanel");
+  const handle = $("elevResizer");
+  let startY = 0, startH = 0, dragging = false;
+
+  const onDown = (e) => {
+    dragging = true;
+    startY = (e.touches ? e.touches[0].clientY : e.clientY);
+    startH = panel.getBoundingClientRect().height;
+    panel.classList.add("resizing");
+    e.preventDefault();
+  };
+  const onMove = (e) => {
+    if (!dragging) return;
+    const y = (e.touches ? e.touches[0].clientY : e.clientY);
+    const dy = startY - y;
+    const maxH = window.innerHeight * 0.8;
+    const newH = Math.max(80, Math.min(maxH, startH + dy));
+    panel.style.height = newH + "px";
+  };
+  const onUp = () => {
+    if (!dragging) return;
+    dragging = false;
+    panel.classList.remove("resizing");
+  };
+
+  handle.addEventListener("mousedown", onDown);
+  window.addEventListener("mousemove", onMove);
+  window.addEventListener("mouseup", onUp);
+  handle.addEventListener("touchstart", onDown, { passive: false });
+  window.addEventListener("touchmove", onMove, { passive: false });
+  window.addEventListener("touchend", onUp);
+})();
+
+// ---------------------------------------------------------------------------
+// REPÈRES KM + SURVOL DU PROFIL
+// ---------------------------------------------------------------------------
+$("elevMarks").addEventListener("change", () => {
+  if (elevData.length) drawProfile();
+});
+
+(function setupElevHover() {
+  const wrap = $("elevSvg").parentElement;
+  const svg = $("elevSvg");
+  const cursor = $("elevCursor");
+  const tip = $("elevTooltip");
+
+  const hide = () => {
+    cursor.style.display = "none";
+    tip.style.display = "none";
+    if (hoverMarker) { map.removeLayer(hoverMarker); hoverMarker = null; }
+  };
+
+  wrap.addEventListener("mousemove", (e) => {
+    if (!elevData.length) return;
+    const rect = svg.getBoundingClientRect();
+    const relX = e.clientX - rect.left;
+    if (relX < 0 || relX > rect.width) return hide();
+    const ratio = relX / rect.width;
+    // index de l'échantillon le plus proche
+    const idx = Math.max(0, Math.min(elevData.length - 1,
+      Math.round(ratio * (elevData.length - 1))));
+    const z = elevData[idx];
+    const d = elevDist[idx] / 1000;
+    const latlng = elevPts[idx];
+    // position du curseur (aligné sur l'échantillon)
+    const xPx = (idx / (elevData.length - 1)) * rect.width;
+    cursor.style.left = xPx + "px";
+    cursor.style.display = "block";
+    tip.innerHTML = `<b>${d.toFixed(2)} km</b> · ${Math.round(z)} m`;
+    tip.style.display = "block";
+    // garde le tooltip dans les limites
+    const tipW = tip.offsetWidth;
+    let left = xPx;
+    if (left - tipW/2 < 4) left = tipW/2 + 4;
+    if (left + tipW/2 > rect.width - 4) left = rect.width - tipW/2 - 4;
+    tip.style.left = left + "px";
+    tip.style.top = "0px";
+    // marqueur sur la carte
+    if (latlng) {
+      if (!hoverMarker) {
+        hoverMarker = L.circleMarker(latlng, {
+          radius: 7, color: "#fff", weight: 2,
+          fillColor: "#36462a", fillOpacity: 1,
+          interactive: false
+        }).addTo(map);
+      } else {
+        hoverMarker.setLatLng(latlng);
+      }
+    }
+  });
+  wrap.addEventListener("mouseleave", hide);
+})();
+
+// nettoie le marqueur de survol quand on efface tout
+const _origClear = $("clear").onclick;
+$("clear").onclick = () => {
+  if (hoverMarker) { map.removeLayer(hoverMarker); hoverMarker = null; }
+  elevPts = [];
+  _origClear();
+};
 </script>
 </body>
 </html>
