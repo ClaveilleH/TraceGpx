@@ -94,6 +94,33 @@
   .status-dot.offline { background: var(--rust); }
   .storage-badge { white-space: nowrap; opacity: .75; }
 
+  .offline-box {
+    background: #fff; border: 1px solid var(--line); border-radius: 6px;
+    padding: 9px 10px; margin-bottom: 14px;
+  }
+  .offline-head {
+    display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+    font-size: 10px; margin-bottom: 7px;
+  }
+  .offline-head strong {
+    font-family: 'Fraunces', serif; font-size: 13px; font-weight: 600;
+  }
+  .offline-meter {
+    height: 5px; background: #eee9df; border-radius: 999px; overflow: hidden;
+    margin-bottom: 8px;
+  }
+  .offline-meter span {
+    display: block; height: 100%; width: 0%; background: var(--moss);
+    transition: width .2s;
+  }
+  .offline-actions { display: grid; grid-template-columns: 1fr auto; gap: 7px; }
+  .offline-actions button {
+    padding: 7px 8px; font-size: 10px; cursor: pointer; font-family: inherit;
+    border-radius: 6px; border: 1px solid var(--line); background: #fff; color: var(--ink);
+  }
+  .offline-actions button:disabled { opacity: .45; cursor: not-allowed; }
+  .offline-progress { margin-top: 7px; min-height: 12px; font-size: 9px; opacity: .65; }
+
   .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 14px; }
   .stat { background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; }
   .stat .label { font-size: 9px; text-transform: uppercase; letter-spacing: .6px; opacity: .55; }
@@ -165,6 +192,19 @@
       <span class="storage-badge" id="storageLabel">Stockage local</span>
     </div>
 
+    <div class="offline-box" id="topoOffline">
+      <div class="offline-head">
+        <strong>OpenTopo hors ligne</strong>
+        <span id="topoCacheLabel">0 Mo</span>
+      </div>
+      <div class="offline-meter"><span id="topoCacheMeter"></span></div>
+      <div class="offline-actions">
+        <button id="prepareTopo" disabled>Préparer la trace</button>
+        <button id="clearTopo">Vider</button>
+      </div>
+      <div class="offline-progress" id="topoProgress">Trace requise</div>
+    </div>
+
     <div class="stats">
       <div class="stat"><div class="label">Distance</div><div class="val" id="dist">0<small> km</small></div></div>
       <div class="stat"><div class="label">D+ </div><div class="val" id="dplus">0<small> m</small></div></div>
@@ -207,6 +247,43 @@ const OFFLINE_ASSETS = [
   "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js",
   "https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Spline+Sans+Mono:wght@400;500&display=swap",
 ];
+const OPENTOPO_URL = "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png";
+const OPENTOPO_DB = "tracegpx-opentopo-v1";
+const OPENTOPO_STORE = "tiles";
+const OPENTOPO_MAX_BYTES = 200 * 1024 * 1024;
+const OPENTOPO_EST_TILE_BYTES = 50000;
+const OPENTOPO_MAX_TILE_BYTES = 300 * 1024;
+const OPENTOPO_TRACE_BUFFER_M = 3000;
+const OPENTOPO_SAMPLE_STEP_M = 450;
+const OPENTOPO_PREFETCH_ZOOMS = [10, 11, 12, 13, 14, 15];
+const OPENTOPO_DOWNLOAD_DELAY_MS = 120;
+const OPENTOPO_SUBDOMAINS = ["a", "b", "c"];
+const EMPTY_TILE =
+  "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='256' height='256' viewBox='0 0 256 256'%3E%3Crect width='256' height='256' fill='%23e8e3d8'/%3E%3Cpath d='M0 255H256M255 0V256' stroke='%23d8d2c4' stroke-width='2'/%3E%3C/svg%3E";
+
+const OpenTopoOfflineLayer = L.TileLayer.extend({
+  createTile(coords, done) {
+    const img = document.createElement("img");
+    img.alt = "";
+    img.decoding = "async";
+    img.crossOrigin = "anonymous";
+
+    loadOpenTopoTile(coords, this.getTileUrl(coords)).then(src => {
+      const cleanup = () => {
+        if (src.startsWith("blob:")) setTimeout(() => URL.revokeObjectURL(src), 1000);
+      };
+      img.onload = () => { cleanup(); done(null, img); };
+      img.onerror = () => { cleanup(); done(new Error("Erreur tuile OpenTopo"), img); };
+      img.src = src;
+    }).catch(() => {
+      img.onload = () => done(null, img);
+      img.onerror = () => done(new Error("Tuile OpenTopo indisponible"), img);
+      img.src = navigator.onLine ? this.getTileUrl(coords) : EMPTY_TILE;
+    });
+
+    return img;
+  },
+});
 
 const layers = {
   plan: L.tileLayer(
@@ -217,8 +294,8 @@ const layers = {
     WMTS.replace("{layer}","ORTHOIMAGERY.ORTHOPHOTOS")
         .replace("{style}","normal").replace("{format}","image/jpeg"),
     { maxZoom: 19, attribution: "© IGN" }),
-  topo: L.tileLayer(
-    "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
+  topo: new OpenTopoOfflineLayer(
+    OPENTOPO_URL,
     { maxZoom: 17, subdomains: "abc",
       attribution: "© OpenTopoMap (CC-BY-SA) · données © OpenStreetMap" }),
 };
@@ -237,6 +314,11 @@ let markers = L.layerGroup().addTo(map);
 let elevData = [];
 let activeLayer = "plan";
 let savedView = null;
+let topoDbPromise = null;
+let topoStats = { count: 0, size: 0 };
+let topoEstimate = { count: 0, size: 0 };
+let topoEstimateTimer = null;
+let topoDownloadRunning = false;
 
 const $ = id => document.getElementById(id);
 const snap = $("snap");
@@ -323,10 +405,309 @@ async function warmOfflineCache() {
   } catch { /* cache indisponible ou requête réseau refusée */ }
 }
 
+// ---------------------------------------------------------------------------
+// TUILES OPENTOPO HORS LIGNE
+// ---------------------------------------------------------------------------
+function formatBytes(bytes) {
+  if (bytes >= 1024 * 1024) return `${Math.round(bytes / 1024 / 1024)} Mo`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} ko`;
+  return `${bytes} o`;
+}
+
+function getOpenTopoTileKey(coords) {
+  return `${coords.z}/${coords.x}/${coords.y}`;
+}
+
+function openTopoTileUrl(coords) {
+  const sub = OPENTOPO_SUBDOMAINS[Math.abs(coords.x + coords.y) % OPENTOPO_SUBDOMAINS.length];
+  return OPENTOPO_URL
+    .replace("{s}", sub)
+    .replace("{z}", coords.z)
+    .replace("{x}", coords.x)
+    .replace("{y}", coords.y);
+}
+
+function openTopoDb() {
+  if (!("indexedDB" in window)) return Promise.reject(new Error("IndexedDB indisponible"));
+  if (topoDbPromise) return topoDbPromise;
+
+  topoDbPromise = new Promise((resolve, reject) => {
+    const req = indexedDB.open(OPENTOPO_DB, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(OPENTOPO_STORE)) {
+        const store = db.createObjectStore(OPENTOPO_STORE, { keyPath: "key" });
+        store.createIndex("lastUsed", "lastUsed");
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+
+  return topoDbPromise;
+}
+
+async function withOpenTopoStore(mode, run) {
+  const db = await openTopoDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(OPENTOPO_STORE, mode);
+    const store = tx.objectStore(OPENTOPO_STORE);
+    const req = run(store);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function getOpenTopoTile(key) {
+  return withOpenTopoStore("readonly", store => store.get(key));
+}
+
+async function putOpenTopoTile(record) {
+  return withOpenTopoStore("readwrite", store => store.put(record));
+}
+
+async function clearOpenTopoStore() {
+  await withOpenTopoStore("readwrite", store => store.clear());
+}
+
+async function scanOpenTopoStats() {
+  if (!("indexedDB" in window)) return;
+  try {
+    const db = await openTopoDb();
+    const stats = await new Promise((resolve, reject) => {
+      const next = { count: 0, size: 0 };
+      const tx = db.transaction(OPENTOPO_STORE, "readonly");
+      const store = tx.objectStore(OPENTOPO_STORE);
+      const req = store.openCursor();
+      req.onsuccess = () => {
+        const cursor = req.result;
+        if (!cursor) return;
+        next.count += 1;
+        next.size += cursor.value.size || 0;
+        cursor.continue();
+      };
+      tx.oncomplete = () => resolve(next);
+      tx.onerror = () => reject(tx.error);
+    });
+    topoStats = stats;
+  } catch {
+    topoStats = { count: 0, size: 0 };
+  }
+  updateTopoOfflineUi();
+}
+
+async function touchOpenTopoTile(record) {
+  if (Date.now() - (record.lastUsed || 0) < 60 * 60 * 1000) return;
+  try {
+    await putOpenTopoTile({ ...record, lastUsed: Date.now() });
+  } catch { /* la tuile reste utilisable même si la date échoue */ }
+}
+
+async function cacheOpenTopoBlob(key, blob, source) {
+  if (!blob?.size || blob.size > OPENTOPO_MAX_TILE_BYTES) return false;
+  try {
+    const existing = await getOpenTopoTile(key);
+    if (existing) {
+      touchOpenTopoTile(existing);
+      return true;
+    }
+    if (topoStats.size + blob.size > OPENTOPO_MAX_BYTES) return false;
+    await putOpenTopoTile({ key, blob, size: blob.size, source, lastUsed: Date.now() });
+    topoStats = { count: topoStats.count + 1, size: topoStats.size + blob.size };
+    updateTopoOfflineUi();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function fetchOpenTopoBlob(url) {
+  const response = await fetch(url, { mode: "cors", cache: "default" });
+  if (!response.ok) throw new Error("Tuile OpenTopo refusée");
+  const blob = await response.blob();
+  if (!blob.type.startsWith("image/")) throw new Error("Réponse OpenTopo invalide");
+  return blob;
+}
+
+async function loadOpenTopoTile(coords, url) {
+  const key = getOpenTopoTileKey(coords);
+  try {
+    const cached = await getOpenTopoTile(key);
+    if (cached?.blob) {
+      touchOpenTopoTile(cached);
+      return URL.createObjectURL(cached.blob);
+    }
+  } catch { /* fallback réseau */ }
+
+  if (!navigator.onLine) return EMPTY_TILE;
+
+  try {
+    const blob = await fetchOpenTopoBlob(url);
+    await cacheOpenTopoBlob(key, blob, "view");
+    return URL.createObjectURL(blob);
+  } catch {
+    return navigator.onLine ? url : EMPTY_TILE;
+  }
+}
+
+function latLngToTile(point, zoom) {
+  const latRad = point.lat * Math.PI / 180;
+  const n = 2 ** zoom;
+  const x = Math.floor((point.lng + 180) / 360 * n);
+  const y = Math.floor((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2 * n);
+  return {
+    z: zoom,
+    x: Math.max(0, Math.min(n - 1, x)),
+    y: Math.max(0, Math.min(n - 1, y)),
+  };
+}
+
+function tileWidthMeters(lat, zoom) {
+  return 40075016.686 * Math.cos(lat * Math.PI / 180) / (2 ** zoom);
+}
+
+function interpolateLatLng(a, b, t) {
+  return L.latLng(
+    a.lat + (b.lat - a.lat) * t,
+    a.lng + (b.lng - a.lng) * t
+  );
+}
+
+function sampledTrace(line) {
+  if (line.length < 2) return line;
+  const sampled = [line[0]];
+  for (let i = 1; i < line.length; i++) {
+    const a = line[i - 1], b = line[i];
+    const steps = Math.max(1, Math.ceil(a.distanceTo(b) / OPENTOPO_SAMPLE_STEP_M));
+    for (let s = 1; s <= steps; s++) sampled.push(interpolateLatLng(a, b, s / steps));
+  }
+  return sampled;
+}
+
+function buildOpenTopoTracePlan() {
+  const line = fullLine();
+  if (line.length < 2) return [];
+
+  const sampled = sampledTrace(line);
+  const tiles = new Map();
+  OPENTOPO_PREFETCH_ZOOMS.forEach(z => {
+    sampled.forEach(point => {
+      const center = latLngToTile(point, z);
+      const radius = Math.max(1, Math.ceil(OPENTOPO_TRACE_BUFFER_M / tileWidthMeters(point.lat, z)));
+      const n = 2 ** z;
+      for (let x = Math.max(0, center.x - radius); x <= Math.min(n - 1, center.x + radius); x++) {
+        for (let y = Math.max(0, center.y - radius); y <= Math.min(n - 1, center.y + radius); y++) {
+          const tile = { z, x, y };
+          tiles.set(getOpenTopoTileKey(tile), tile);
+        }
+      }
+    });
+  });
+
+  return Array.from(tiles.entries())
+    .map(([key, tile]) => ({ ...tile, key }))
+    .sort((a, b) => a.z - b.z || a.x - b.x || a.y - b.y);
+}
+
+function updateTopoEstimate() {
+  const plan = buildOpenTopoTracePlan();
+  topoEstimate = { count: plan.length, size: plan.length * OPENTOPO_EST_TILE_BYTES };
+  updateTopoOfflineUi();
+}
+
+function scheduleTopoEstimate() {
+  clearTimeout(topoEstimateTimer);
+  topoEstimateTimer = setTimeout(updateTopoEstimate, 120);
+}
+
+function updateTopoOfflineUi(message) {
+  const pct = Math.min(100, Math.round(topoStats.size / OPENTOPO_MAX_BYTES * 100));
+  $("topoCacheLabel").textContent = `${formatBytes(topoStats.size)} · ${topoStats.count} tuiles`;
+  $("topoCacheMeter").style.width = `${pct}%`;
+  $("clearTopo").disabled = topoDownloadRunning || topoStats.count === 0;
+
+  const estimateOk = topoEstimate.count > 0 && topoEstimate.size <= OPENTOPO_MAX_BYTES;
+  const canPrepare = anchors.length >= 2 && estimateOk && navigator.onLine &&
+    !topoDownloadRunning && "indexedDB" in window;
+  $("prepareTopo").disabled = !canPrepare;
+
+  if (message) {
+    $("topoProgress").textContent = message;
+  } else if (!("indexedDB" in window)) {
+    $("topoProgress").textContent = "Stockage indisponible";
+  } else if (anchors.length < 2) {
+    $("topoProgress").textContent = "Trace requise";
+  } else {
+    $("topoProgress").textContent =
+      `Prévu ${topoEstimate.count} tuiles · env. ${formatBytes(topoEstimate.size)} / 200 Mo`;
+  }
+}
+
+function wait(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function prepareOpenTopoTrace() {
+  const plan = buildOpenTopoTracePlan();
+  const estimatedSize = plan.length * OPENTOPO_EST_TILE_BYTES;
+  if (!plan.length) return updateTopoOfflineUi("Trace requise");
+  if (estimatedSize > OPENTOPO_MAX_BYTES) {
+    return updateTopoOfflineUi(`Zone trop grande · env. ${formatBytes(estimatedSize)}`);
+  }
+  if (!navigator.onLine) return updateTopoOfflineUi("Connexion requise");
+
+  topoDownloadRunning = true;
+  updateTopoOfflineUi("Préparation 0%");
+
+  let stored = 0, skipped = 0, failed = 0;
+  for (let i = 0; i < plan.length; i++) {
+    const tile = plan[i];
+    try {
+      const existing = await getOpenTopoTile(tile.key);
+      if (existing) {
+        skipped += 1;
+        touchOpenTopoTile(existing);
+      } else if (topoStats.size >= OPENTOPO_MAX_BYTES) {
+        failed += 1;
+      } else {
+        const blob = await fetchOpenTopoBlob(openTopoTileUrl(tile));
+        const ok = await cacheOpenTopoBlob(tile.key, blob, "trace");
+        if (ok) stored += 1; else failed += 1;
+        await wait(OPENTOPO_DOWNLOAD_DELAY_MS);
+      }
+    } catch {
+      failed += 1;
+    }
+
+    if (i % 10 === 0 || i === plan.length - 1) {
+      const progress = Math.round((i + 1) / plan.length * 100);
+      updateTopoOfflineUi(`Préparation ${progress}% · ${stored} ajoutées · ${skipped} déjà là`);
+    }
+  }
+
+  topoDownloadRunning = false;
+  updateTopoOfflineUi(`Prêt · ${stored} ajoutées · ${failed} échecs`);
+  if (activeLayer === "topo") layers.topo.redraw();
+}
+
+async function clearOpenTopoCache() {
+  if (topoDownloadRunning) return;
+  try {
+    await clearOpenTopoStore();
+    topoStats = { count: 0, size: 0 };
+    updateTopoOfflineUi("Cache OpenTopo vidé");
+    if (activeLayer === "topo") layers.topo.redraw();
+  } catch {
+    updateTopoOfflineUi("Suppression impossible");
+  }
+}
+
 function syncOnlineStatus() {
   const online = navigator.onLine;
   $("netDot").classList.toggle("offline", !online);
   $("netLabel").textContent = online ? "En ligne" : "Hors ligne";
+  updateTopoOfflineUi();
 }
 
 // ---------------------------------------------------------------------------
@@ -391,6 +772,7 @@ function redraw() {
   $("clear").disabled = !has;
   $("export").disabled = anchors.length < 2;
   $("hint").style.opacity = has ? 0 : 1;
+  scheduleTopoEstimate();
 }
 
 // ---------------------------------------------------------------------------
@@ -517,6 +899,8 @@ document.querySelectorAll("#layers button").forEach(b => {
 });
 
 snap.onchange = saveState;
+$("prepareTopo").onclick = prepareOpenTopoTrace;
+$("clearTopo").onclick = clearOpenTopoCache;
 window.addEventListener("online", syncOnlineStatus);
 window.addEventListener("offline", syncOnlineStatus);
 window.addEventListener("beforeunload", saveState);
@@ -528,6 +912,7 @@ syncOnlineStatus();
 requestPersistentStorage();
 registerServiceWorker();
 warmOfflineCache();
+scanOpenTopoStats();
 map.on("moveend", saveState);
 redraw();
 refreshStats({ updateElevation: !elevData.length });
