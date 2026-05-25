@@ -10,9 +10,7 @@
 
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" type="image/svg+xml" href="tracegpx-icon.svg">
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Spline+Sans+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="vendor/leaflet/leaflet.min.css"/>
 
 <style>
   :root {
@@ -28,7 +26,7 @@
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { height: 100%; }
   body {
-    font-family: 'Spline Sans Mono', monospace;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     color: var(--ink);
     background: var(--bg);
     overflow: hidden;
@@ -51,7 +49,7 @@
     padding: 14px 16px;
   }
   .panel header h1 {
-    font-family: 'Fraunces', serif;
+    font-family: Georgia, 'Times New Roman', serif;
     font-weight: 600;
     font-size: 19px;
     letter-spacing: .3px;
@@ -103,7 +101,7 @@
     font-size: 10px; margin-bottom: 7px;
   }
   .offline-head strong {
-    font-family: 'Fraunces', serif; font-size: 13px; font-weight: 600;
+    font-family: Georgia, 'Times New Roman', serif; font-size: 13px; font-weight: 600;
   }
   .offline-meter {
     height: 5px; background: #eee9df; border-radius: 999px; overflow: hidden;
@@ -124,7 +122,7 @@
   .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 14px; }
   .stat { background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; }
   .stat .label { font-size: 9px; text-transform: uppercase; letter-spacing: .6px; opacity: .55; }
-  .stat .val { font-family: 'Fraunces', serif; font-size: 19px; font-weight: 600; margin-top: 1px; }
+  .stat .val { font-family: Georgia, 'Times New Roman', serif; font-size: 19px; font-weight: 600; margin-top: 1px; }
   .stat .val small { font-size: 11px; font-weight: 400; opacity: .6; }
 
   .actions { display: flex; flex-direction: column; gap: 7px; }
@@ -150,7 +148,7 @@
     display: flex; justify-content: space-between; align-items: center;
     padding: 6px 16px; font-size: 11px; border-bottom: 1px solid var(--line);
   }
-  .elev .head strong { font-family: 'Fraunces', serif; font-size: 13px; }
+  .elev .head strong { font-family: Georgia, 'Times New Roman', serif; font-size: 13px; }
   .elev svg { display: block; width: 100%; height: 110px; }
 
   .hint {
@@ -228,7 +226,7 @@
 
 <div class="hint" id="hint">Clique sur la carte pour poser ton premier point</div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="vendor/leaflet/leaflet.min.js"></script>
 <script>
 // ---------------------------------------------------------------------------
 // CONFIG — endpoints publics Géoplateforme (pas de clé nécessaire)
@@ -241,12 +239,6 @@ const WMTS = "https://data.geopf.fr/wmts" +
 const ROUTE_URL = "https://data.geopf.fr/navigation/itineraire";
 const ELEV_URL  = "https://data.geopf.fr/altimetrie/1.0/calcul/alti/rest/elevationLine.json";
 const STORAGE_KEY = "tracegpx.state.v1";
-const RUNTIME_CACHE = "tracegpx-runtime-v1";
-const OFFLINE_ASSETS = [
-  "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css",
-  "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js",
-  "https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Spline+Sans+Mono:wght@400;500&display=swap",
-];
 const OPENTOPO_URL = "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png";
 const OPENTOPO_DB = "tracegpx-opentopo-v1";
 const OPENTOPO_STORE = "tiles";
@@ -389,20 +381,6 @@ function registerServiceWorker() {
   window.addEventListener("load", () => {
     navigator.serviceWorker.register("./service-worker.js").catch(() => {});
   });
-}
-
-async function warmOfflineCache() {
-  if (!("caches" in window)) return;
-  try {
-    const cache = await caches.open(RUNTIME_CACHE);
-    await Promise.allSettled(OFFLINE_ASSETS.map(async url => {
-      const request = new Request(url, { mode: "no-cors" });
-      const cached = await cache.match(request);
-      if (cached) return;
-      const response = await fetch(request);
-      if (response) await cache.put(request, response);
-    }));
-  } catch { /* cache indisponible ou requête réseau refusée */ }
 }
 
 // ---------------------------------------------------------------------------
@@ -911,7 +889,6 @@ setActiveLayer(activeLayer, false);
 syncOnlineStatus();
 requestPersistentStorage();
 registerServiceWorker();
-warmOfflineCache();
 scanOpenTopoStats();
 map.on("moveend", saveState);
 redraw();

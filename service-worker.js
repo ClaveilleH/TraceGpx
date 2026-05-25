@@ -1,17 +1,20 @@
-const STATIC_CACHE = "tracegpx-static-v1";
+const STATIC_CACHE = "tracegpx-static-v2";
 const RUNTIME_CACHE = "tracegpx-runtime-v1";
 
 const APP_SHELL = [
   "./tracegpx.html",
   "./manifest.webmanifest",
   "./tracegpx-icon.svg",
+  "./vendor/leaflet/leaflet.min.css",
+  "./vendor/leaflet/leaflet.min.js",
+  "./vendor/leaflet/images/layers.png",
+  "./vendor/leaflet/images/layers-2x.png",
+  "./vendor/leaflet/images/marker-icon.png",
+  "./vendor/leaflet/images/marker-icon-2x.png",
+  "./vendor/leaflet/images/marker-shadow.png",
 ];
 
-const CACHEABLE_ORIGINS = new Set([
-  "https://cdnjs.cloudflare.com",
-  "https://fonts.googleapis.com",
-  "https://fonts.gstatic.com",
-]);
+const CACHEABLE_ORIGINS = new Set();
 
 self.addEventListener("install", event => {
   event.waitUntil(
