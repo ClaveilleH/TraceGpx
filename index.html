@@ -95,6 +95,27 @@
   .btn-ghost:hover { background: #f0ece2; }
   .actions button:disabled { opacity: .4; cursor: not-allowed; }
 
+  /* ---- Sélecteur de couleur du tracé ---- */
+  .color-row {
+    display: flex; align-items: center; gap: 8px;
+    margin-bottom: 14px; font-size: 12px;
+  }
+  .color-row .swatches { display: flex; gap: 5px; flex: 1; }
+  .color-row .sw {
+    width: 20px; height: 20px; border-radius: 50%;
+    cursor: pointer; border: 2px solid #fff;
+    box-shadow: 0 0 0 1px var(--line); transition: transform .12s;
+  }
+  .color-row .sw:hover { transform: scale(1.15); }
+  .color-row .sw.active { box-shadow: 0 0 0 2px var(--ink); }
+  .color-row .picker {
+    width: 22px; height: 22px; padding: 0; cursor: pointer;
+    border: 1px solid var(--line); border-radius: 4px;
+    background: #fff; overflow: hidden;
+  }
+  .color-row .picker::-webkit-color-swatch-wrapper { padding: 0; }
+  .color-row .picker::-webkit-color-swatch { border: none; border-radius: 3px; }
+
   /* ---- Profil altimétrique ---- */
   .elev {
     position: absolute; bottom: 0; left: 0; right: 0; z-index: 1000;
@@ -195,6 +216,18 @@
       <span>Suivre les chemins <em style="opacity:.6">(snap)</em></span>
     </div>
 
+    <div class="color-row">
+      <span style="opacity:.7">Couleur</span>
+      <div class="swatches" id="colorSwatches">
+        <span class="sw active" data-color="#b5532a" style="background:#b5532a" title="Rouille"></span>
+        <span class="sw" data-color="#4a5d3a" style="background:#4a5d3a" title="Mousse"></span>
+        <span class="sw" data-color="#2a5a8a" style="background:#2a5a8a" title="Bleu"></span>
+        <span class="sw" data-color="#6b3a5e" style="background:#6b3a5e" title="Prune"></span>
+        <span class="sw" data-color="#2a2620" style="background:#2a2620" title="Encre"></span>
+      </div>
+      <input type="color" id="colorPicker" class="picker" value="#b5532a" title="Couleur personnalisée">
+    </div>
+
     <div class="stats">
       <div class="stat"><div class="label">Distance</div><div class="val" id="dist">0<small> km</small></div></div>
       <div class="stat"><div class="label">D+ </div><div class="val" id="dplus">0<small> m</small></div></div>
@@ -267,7 +300,11 @@ const layers = {
       attribution: "© OpenTopoMap (CC-BY-SA) · données © OpenStreetMap" }),
 };
 
-const map = L.map("map", { center: [45.05, 6.40], zoom: 12, zoomControl: true });
+const map = L.map("map", {
+  center: [45.05, 6.40], zoom: 12,
+  zoomControl: false  // recréé à droite pour libérer le coin haut-gauche
+});
+L.control.zoom({ position: "topright" }).addTo(map);
 layers.topo.addTo(map);
 
 // ---------------------------------------------------------------------------
@@ -275,8 +312,18 @@ layers.topo.addTo(map);
 // ---------------------------------------------------------------------------
 let anchors = [];          // points cliqués (L.latLng)
 let segments = [];         // tableaux de latlng entre 2 ancres consécutives
-let polyline = L.polyline([], { color: "#b5532a", weight: 4, opacity: .9 }).addTo(map);
+let traceColor = "#b5532a"; // couleur du tracé (modifiable par l'utilisateur)
+let polyline = L.polyline([], { color: traceColor, weight: 4, opacity: .9 }).addTo(map);
 let markers = L.layerGroup().addTo(map);
+
+// assombrit une couleur hex de `amt` (0..1) — pour les contrastes (1er pt, etc.)
+function shade(hex, amt) {
+  const c = hex.replace("#","");
+  const r = parseInt(c.slice(0,2),16), g = parseInt(c.slice(2,4),16), b = parseInt(c.slice(4,6),16);
+  const f = 1 - amt;
+  const h = v => Math.max(0, Math.min(255, Math.round(v * f))).toString(16).padStart(2,"0");
+  return "#" + h(r) + h(g) + h(b);
+}
 let elevData = [];         // altitudes échantillonnées
 let elevDist = [];         // distances cumulées (m) pour chaque échantillon
 let elevPts  = [];         // latlng correspondant à chaque échantillon
@@ -348,11 +395,14 @@ function fullLine() { return segments.flat(); }
 
 function redraw() {
   polyline.setLatLngs(fullLine());
+  polyline.setStyle({ color: traceColor });
   markers.clearLayers();
+  // le 1er point reste visuellement distinct (assombri) pour repérer le départ
+  const startColor = shade(traceColor, 0.35);
   anchors.forEach((p, i) => {
     L.circleMarker(p, {
       radius: 5, color: "#fff", weight: 2,
-      fillColor: i === 0 ? "#4a5d3a" : "#b5532a", fillOpacity: 1
+      fillColor: i === 0 ? startColor : traceColor, fillOpacity: 1
     }).addTo(markers);
   });
   const has = anchors.length > 0;
@@ -438,8 +488,8 @@ function drawProfile() {
   }
 
   svg.innerHTML =
-    `<path d="${area}" fill="#b5532a" opacity="0.12"/>` +
-    `<path d="${dPath}" fill="none" stroke="#b5532a" stroke-width="2"/>` +
+    `<path d="${area}" fill="${traceColor}" opacity="0.12"/>` +
+    `<path d="${dPath}" fill="none" stroke="${traceColor}" stroke-width="2"/>` +
     marks;
   $("elevRange").textContent = `${Math.round(min)}–${Math.round(max)} m`;
   $("elevPanel").classList.add("show");
@@ -546,6 +596,26 @@ $("elevMarks").addEventListener("change", () => {
 });
 
 // ---------------------------------------------------------------------------
+// SÉLECTEUR DE COULEUR DU TRACÉ
+// ---------------------------------------------------------------------------
+(function setupColorPicker() {
+  const swatches = document.querySelectorAll("#colorSwatches .sw");
+  const picker = $("colorPicker");
+  const applyColor = (col) => {
+    traceColor = col;
+    picker.value = col;
+    // active le swatch correspondant (sinon aucun)
+    swatches.forEach(s => s.classList.toggle("active", s.dataset.color.toLowerCase() === col.toLowerCase()));
+    // redessine tout ce qui dépend de la couleur
+    redraw();
+    if (elevData.length) drawProfile();
+    if (hoverMarker) hoverMarker.setStyle({ fillColor: shade(traceColor, 0.25) });
+  };
+  swatches.forEach(s => s.addEventListener("click", () => applyColor(s.dataset.color)));
+  picker.addEventListener("input", (e) => applyColor(e.target.value));
+})();
+
+// ---------------------------------------------------------------------------
 // BOUTON RÉDUIRE / RESTAURER (style fenêtre Windows)
 // ---------------------------------------------------------------------------
 (function setupMinimize() {
@@ -619,16 +689,17 @@ $("elevMarks").addEventListener("change", () => {
     if (left + tipW/2 > rect.width - 4) left = rect.width - tipW/2 - 4;
     tip.style.left = left + "px";
     tip.style.top = "0px";
-    // marqueur sur la carte
+    // marqueur sur la carte (couleur dérivée du tracé)
     if (latlng) {
+      const hoverColor = shade(traceColor, 0.25);
       if (!hoverMarker) {
         hoverMarker = L.circleMarker(latlng, {
           radius: 7, color: "#fff", weight: 2,
-          fillColor: "#36462a", fillOpacity: 1,
+          fillColor: hoverColor, fillOpacity: 1,
           interactive: false
         }).addTo(map);
       } else {
-        hoverMarker.setLatLng(latlng);
+        hoverMarker.setLatLng(latlng).setStyle({ fillColor: hoverColor });
       }
     }
   });
