@@ -129,6 +129,20 @@
     border: 1px solid var(--line); border-radius: 4px;
     background: #fff; color: var(--ink); cursor: pointer;
   }
+  .elev .head .min-btn {
+    width: 24px; height: 22px; border: 1px solid var(--line);
+    background: #fff; border-radius: 4px; cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center;
+    color: var(--ink); padding: 0; font-family: inherit;
+    transition: background .15s, border-color .15s;
+  }
+  .elev .head .min-btn:hover { background: var(--moss); color: #fff; border-color: var(--moss); }
+  .elev .head .min-btn svg { width: 12px; height: 12px; display: block; }
+  /* État minimisé : on cache le contenu, on garde la barre de titre */
+  .elev.minimized { height: auto !important; }
+  .elev.minimized .resizer { display: none; }
+  .elev.minimized .head { margin-top: 0; border-bottom: none; }
+  .elev.minimized .svg-wrap { display: none; }
   .elev .svg-wrap { position: relative; height: calc(100% - 42px); }
   .elev svg { display: block; width: 100%; height: 100%; }
   .elev-cursor {
@@ -167,9 +181,9 @@
   </header>
   <div class="body">
     <div class="toggle-row" id="layers">
-      <button data-layer="plan" class="active">Plan IGN</button>
-      <button data-layer="topo">OpenTopo</button>
+      <button data-layer="topo" class="active">OpenTopo</button>
       <button data-layer="photo">Satellite</button>
+      <button data-layer="plan">Plan IGN</button>
     </div>
 
     <div class="mode-row">
@@ -208,6 +222,11 @@
         <option value="10">Tous les 10 km</option>
       </select>
       <span id="elevRange"></span>
+      <button class="min-btn" id="elevMin" title="Réduire / Restaurer" aria-label="Réduire">
+        <svg id="elevMinIcon" viewBox="0 0 12 12">
+          <line x1="2" y1="9" x2="10" y2="9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+        </svg>
+      </button>
     </div>
   </div>
   <div class="svg-wrap">
@@ -248,7 +267,7 @@ const layers = {
 };
 
 const map = L.map("map", { center: [45.05, 6.40], zoom: 12, zoomControl: true });
-layers.plan.addTo(map);
+layers.topo.addTo(map);
 
 // ---------------------------------------------------------------------------
 // ETAT
@@ -279,13 +298,29 @@ map.on("click", async (e) => {
     if (snap.checked) {
       seg = await routeBetween(prev, pt);   // snap-to-route via IGN
     }
-    if (!seg) seg = [prev, pt];             // fallback ligne droite
+    if (!seg) seg = interpolateLine(prev, pt);  // ligne droite échantillonnée
     anchors.push(pt);
     segments.push(seg);
   }
   redraw();
   refreshStats();
 });
+
+// échantillonne une ligne droite entre 2 points proportionnellement
+// à sa longueur (≈ 1 pt tous les 30 m, pas de plafond). Le sous-
+// échantillonnage avant l'appel API (~190 pts max) s'en charge ensuite.
+const STRAIGHT_STEP_M = 30;
+function interpolateLine(a, b) {
+  const distM = a.distanceTo(b);
+  const n = Math.max(2, Math.round(distM / STRAIGHT_STEP_M));
+  const pts = [];
+  for (let i = 0; i <= n; i++) {
+    const t = i / n;
+    pts.push(L.latLng(a.lat + (b.lat - a.lat) * t,
+                      a.lng + (b.lng - a.lng) * t));
+  }
+  return pts;
+}
 
 // ---------------------------------------------------------------------------
 // ROUTING (snap-to-route piéton)
@@ -375,9 +410,12 @@ function drawProfile() {
   const min = Math.min(...elevData), max = Math.max(...elevData);
   const rng = max - min || 1;
   const totalD = elevDist[elevDist.length - 1] || 1;
-  const x = i => pad + (i/(elevData.length-1)) * (W - pad*2);
+  // X basé sur la distance cumulée RÉELLE (et non l'index d'échantillon)
+  // → garantit que le profil est à l'échelle même quand certains segments
+  //   ont peu de points (lignes droites) et d'autres beaucoup (snap).
   const xd = d => pad + (d/totalD) * (W - pad*2);
-  const y = z => H - pad - ((z-min)/rng) * (H - pad*2);
+  const x  = i => xd(elevDist[i]);
+  const y  = z => H - pad - ((z-min)/rng) * (H - pad*2);
 
   // tracé du profil
   let dPath = `M ${x(0)} ${y(elevData[0])}`;
@@ -506,6 +544,35 @@ $("elevMarks").addEventListener("change", () => {
   if (elevData.length) drawProfile();
 });
 
+// ---------------------------------------------------------------------------
+// BOUTON RÉDUIRE / RESTAURER (style fenêtre Windows)
+// ---------------------------------------------------------------------------
+(function setupMinimize() {
+  const panel = $("elevPanel");
+  const btn = $("elevMin");
+  const icon = $("elevMinIcon");
+  // SVG des deux icônes
+  const ICON_MIN = '<line x1="2" y1="9" x2="10" y2="9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>';
+  const ICON_RES = '<rect x="2" y="2" width="8" height="8" fill="none" stroke="currentColor" stroke-width="1.6" rx="1"/>';
+  let savedHeight = "";
+  btn.addEventListener("click", () => {
+    if (panel.classList.contains("minimized")) {
+      panel.classList.remove("minimized");
+      if (savedHeight) panel.style.height = savedHeight;
+      icon.innerHTML = ICON_MIN;
+      btn.title = "Réduire";
+      btn.setAttribute("aria-label", "Réduire");
+    } else {
+      savedHeight = panel.style.height || (panel.getBoundingClientRect().height + "px");
+      panel.classList.add("minimized");
+      panel.style.height = "";
+      icon.innerHTML = ICON_RES;
+      btn.title = "Restaurer";
+      btn.setAttribute("aria-label", "Restaurer");
+    }
+  });
+})();
+
 (function setupElevHover() {
   const wrap = $("elevSvg").parentElement;
   const svg = $("elevSvg");
@@ -524,14 +591,22 @@ $("elevMarks").addEventListener("change", () => {
     const relX = e.clientX - rect.left;
     if (relX < 0 || relX > rect.width) return hide();
     const ratio = relX / rect.width;
-    // index de l'échantillon le plus proche
-    const idx = Math.max(0, Math.min(elevData.length - 1,
-      Math.round(ratio * (elevData.length - 1))));
+    // position en distance le long du parcours
+    const totalD = elevDist[elevDist.length - 1] || 1;
+    const targetD = ratio * totalD;
+    // recherche de l'échantillon le plus proche en distance (binaire)
+    let lo = 0, hi = elevDist.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (elevDist[mid] < targetD) lo = mid + 1; else hi = mid;
+    }
+    let idx = lo;
+    if (idx > 0 && Math.abs(elevDist[idx-1] - targetD) < Math.abs(elevDist[idx] - targetD)) idx--;
     const z = elevData[idx];
     const d = elevDist[idx] / 1000;
     const latlng = elevPts[idx];
-    // position du curseur (aligné sur l'échantillon)
-    const xPx = (idx / (elevData.length - 1)) * rect.width;
+    // position du curseur alignée sur la distance réelle de l'échantillon
+    const xPx = (elevDist[idx] / totalD) * rect.width;
     cursor.style.left = xPx + "px";
     cursor.style.display = "block";
     tip.innerHTML = `<b>${d.toFixed(2)} km</b> · ${Math.round(z)} m`;
